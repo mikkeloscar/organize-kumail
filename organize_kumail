@@ -1,0 +1,190 @@
+#!/usr/bin/python
+
+import imaplib
+import yaml
+import logging
+import sys
+
+from optparse import OptionParser
+from os import getenv
+from os.path import join
+
+
+class KUmail:
+
+    KU_IMAP_SERVER = "exchange.ku.dk"
+    KU_IMAP_SERVER_PORT = 993
+    KU_USERNAME = "%s@ku.dk"
+    KU_ALUMNI = "%s@alumni.ku.dk"
+
+    def __init__(self, config):
+        # setup logger
+        self.logger = logging.getLogger("KUmail")
+        self.logger.addHandler(logging.StreamHandler(stream=sys.stdout))
+        self.logger.setLevel(logging.DEBUG)
+
+        self.username = KUmail.KU_USERNAME % config['ku_username']
+        self.password = config['ku_password']
+        self.student_mail = KUmail.KU_ALUMNI % config['ku_username']
+        self.employee_mail = config['ku_employee_mail']
+
+        # whitelists
+        self.to_whitelist = [self.student_mail] + config['to_whitelist']
+        self.from_whitelist = config['from_whitelist']
+        self.whitelist = self._union([self.to_whitelist, self.from_whitelist])
+
+        # blacklist
+        self.blacklist = [self.employee_mail] + config['blacklist']
+
+        self.server = imaplib.IMAP4_SSL(KUmail.KU_IMAP_SERVER, KUmail.KU_IMAP_SERVER_PORT)
+
+    def organize(self):
+        # login to server and select INBOX
+        self.server.login(self.username, self.password)
+        self.server.select('INBOX')
+
+        # get msgs that should be moved to subfolder
+        msg_uids = self.search()
+
+        # TODO create subfolder if it doesn't exist
+
+        # move mails
+        self.move_mails(msg_uids, 'INBOX', 'INBOX/alumni')
+
+        # close connection
+        self.server.close()
+        self.server.logout()
+
+    def search(self):
+        uids = []
+        for to in self.to_whitelist:
+            e = self.search_header('TO', to)
+            uids.append(e)
+
+        for to in self.to_whitelist:
+            e = self.search_header('Received', to)
+            uids.append(e)
+
+        for from_ in self.from_whitelist:
+            e = self.search_header('FROM', from_)
+            uids.append(e)
+
+        return self._union(uids)
+
+    def search_header(self, header, query):
+        status, response = self.server.search(None, '(HEADER %s "%s")' %
+                (header, query))
+        if status == "OK":
+            return response[0].decode('utf8').split()
+        else:
+            return []
+
+    def move_mails(self, msg_uids, src, dst):
+        moved = 0
+        not_moved = 0
+        for msg_uid in msg_uids:
+            if self.validate_mail(msg_uid):
+                self.move_mail(msg_uid, src, dst)
+                moved = moved + 1;
+            else:
+                not_moved = not_moved + 1;
+        # expunge after moving all mails and marking them Deleted in INBOX
+        self.server.expunge()
+        self.logger.info("Moved %d of %d possible mails" % (moved,
+            moved + not_moved))
+
+    def move_mail(self, msg_uid, src, dst):
+        status, response = self.server.copy(msg_uid, dst)
+        if status == "OK":
+            move, data = self.server.store(msg_uid, '+FLAGS', '(\Deleted)')
+
+    def validate_mail(self, msg_uid):
+        """
+        Make sure that the mail was not sent to employee mail account
+        """
+        fields = "BODY.PEEK[HEADER.FIELDS (FROM TO CC)]"
+        status, data = self.server.fetch(msg_uid, fields)
+        if status == "OK":
+            to = data[0][1].decode('utf8')
+            return self.in_whitelist(to) or not self.in_blacklist(to)
+        return False
+
+    def in_whitelist(self, string):
+        for item in self.whitelist:
+            if item in string:
+                return True
+        return False
+
+    def in_blacklist(self, string):
+        for item in self.blacklist:
+            if item in string:
+                return True
+        return False
+
+    def _union(self, lists):
+        union = set().union(*lists)
+        return list(union)
+
+
+def validate_config(config):
+    default_config = { "ku_username": ""
+                     , "ku_password": ""
+                     , "ku_employee_mail": ""
+                     , "from_whitelist": []
+                     , "to_whitelist": []
+                     , "blacklist": []
+                     }
+
+    for conf in config:
+        if config[conf] and conf in default_config:
+            default_config[conf] = config[conf]
+    return default_config
+
+
+def parse_options():
+    parser = OptionParser("kumail")
+    parser.add_option("-c", "--config", action="store", dest="config",
+            help="config file", default=None)
+    options, args = parser.parse_args()
+
+    return options.config
+
+def read_config():
+    files = []
+
+    config_file = parse_options()
+
+    if config_file:
+        files.append(config_file)
+    else:
+        if getenv("XDG_CONFIG_DIRS"):
+            files.append(join(getenv("XDG_CONFIG_DIRS"), "kumail",
+                "config.yml"))
+        if getenv("XDG_CONFIG_HOME"):
+            files.append(join(getenv("XDG_CONFIG_HOME"), "kumail",
+                "config.yml"))
+        if getenv("HOME"):
+            files.append(join(getenv("HOME"), ".config", "kumail",
+                "config.yml"))
+
+    return parse_config(files)
+
+def parse_config(paths):
+    if len(paths) == 0:
+        return None
+    else:
+        with open(paths[0], "r") as f:
+            config = yaml.load(f)
+            return config
+
+def main():
+    config = read_config()
+    if config:
+        config = validate_config(config)
+        mail = KUmail(config)
+        mail.organize()
+    else:
+        print("Invalid config")
+
+if __name__ == "__main__":
+    main()

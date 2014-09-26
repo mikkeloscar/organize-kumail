@@ -1,0 +1,19 @@
+# username and password
+ku_username: "%"
+ku_password: "%"
+
+# employee mail
+ku_employee_mail: "%@adm.ku.dk"
+
+# From whitelist
+from_whitelist:
+  - "@di.ku.dk"
+
+# To whitelist
+to_whitelist:
+  - "noreply_sciencenyt@science.ku.dk"
+  - "@di.ku.dk"
+  - "@diku.dk"
+
+# Blacklist
+blacklist:
